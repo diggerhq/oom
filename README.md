@@ -6,9 +6,9 @@ A single-page arcade game about virtual machine isolation. You have 2 GiB of RAM
 
 ## Play
 
-Open `index.html` in a browser. That's it.
+Open `index.html` in a browser. That's it — no build, no server, no dependencies.
 
-Or play it live: [oom.here.now](https://oom.here.now)
+To host it: drop `index.html` anywhere that serves static files (GitHub Pages, S3, Netlify, `python -m http.server`, etc.).
 
 ## The 13 isolation types
 
