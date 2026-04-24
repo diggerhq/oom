@@ -1,0 +1,892 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>oom.ai — pack the isolation stack</title>
+<style>
+  :root {
+    --bg: #0a0b10;
+    --bg-2: #0f1119;
+    --panel: #131623;
+    --panel-2: #1a1e2e;
+    --border: #232838;
+    --border-2: #2f3548;
+    --text: #ecf0f6;
+    --muted: #7f8aa3;
+    --green: #9dff6e;        /* sickly terminal green — OOM-killer palette */
+    --amber: #ffc14d;
+    --red:   #ff4d6d;
+    --warn:  #ff8c2b;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: ui-sans-serif, -apple-system, "SF Pro Text", Inter, system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    overflow-x: hidden;
+  }
+  body {
+    background:
+      radial-gradient(900px 500px at 10% -10%, rgba(157,255,110,.06), transparent 60%),
+      radial-gradient(800px 500px at 110% 110%, rgba(255,193,77,.04), transparent 60%),
+      var(--bg);
+    min-height: 100vh;
+  }
+  body::after {
+    content: ""; position: fixed; inset: 0; pointer-events: none;
+    background: repeating-linear-gradient(0deg, rgba(255,255,255,.015) 0 1px, transparent 1px 3px);
+    mix-blend-mode: overlay;
+    z-index: 1;
+  }
+  .mono { font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace; font-variant-numeric: tabular-nums; }
+
+  .wrap { max-width: 1280px; margin: 0 auto; padding: 18px 22px 32px; position: relative; z-index: 2; }
+
+  /* ============== HUD ============== */
+  .hud {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    align-items: center;
+    gap: 20px;
+    padding: 14px 18px;
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    background: linear-gradient(180deg, rgba(255,255,255,.02), transparent), var(--panel);
+    position: sticky; top: 12px; z-index: 20;
+    backdrop-filter: blur(8px);
+  }
+  .brand {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 22px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    color: var(--text);
+  }
+  .brand .dot { color: var(--green); text-shadow: 0 0 12px rgba(157,255,110,.7); }
+  .brand .tag { font-size: 10px; letter-spacing: .3em; color: var(--muted); margin-left: 10px; text-transform: uppercase; }
+
+  .stats { display: flex; gap: 18px; justify-content: center; flex-wrap: wrap; }
+  .stat {
+    display: flex; flex-direction: column; align-items: flex-start;
+    border-left: 1px solid var(--border);
+    padding-left: 14px;
+  }
+  .stat .k { font-size: 10px; letter-spacing: .2em; color: var(--muted); text-transform: uppercase; }
+  .stat .v { font-size: 20px; font-family: ui-monospace, Menlo, monospace; font-variant-numeric: tabular-nums; line-height: 1.1; }
+  .stat .v.green { color: var(--green); text-shadow: 0 0 18px rgba(157,255,110,.35); }
+  .stat .v.amber { color: var(--amber); }
+  .stat .v.red { color: var(--red); animation: pulsered 1s infinite; }
+  @keyframes pulsered { 50% { opacity: .55; } }
+  .stat .sub { font-size: 10px; color: var(--muted); margin-top: 2px; letter-spacing: .08em; }
+
+  .hud-btn {
+    background: transparent;
+    border: 1px solid var(--border-2);
+    color: var(--muted);
+    padding: 7px 12px;
+    border-radius: 999px;
+    font-size: 11px;
+    cursor: pointer;
+    letter-spacing: .15em;
+    text-transform: uppercase;
+    font-family: inherit;
+  }
+  .hud-btn:hover { color: var(--green); border-color: var(--green); }
+
+  .tagline {
+    text-align: center;
+    color: var(--muted);
+    margin: 26px 0 10px;
+    font-size: 14px;
+    line-height: 1.55;
+  }
+  .tagline b { color: var(--green); font-weight: 600; }
+
+  /* ============== LAYOUT ============== */
+  .layout {
+    display: grid;
+    grid-template-columns: 340px 1fr 260px;
+    gap: 18px;
+    margin-top: 14px;
+  }
+  @media (max-width: 1080px) {
+    .layout { grid-template-columns: 1fr; }
+  }
+
+  /* ============== PALETTE ============== */
+  .palette {
+    display: flex; flex-direction: column; gap: 14px;
+  }
+  .pal-section h3 {
+    font-size: 10px;
+    letter-spacing: .2em;
+    color: var(--muted);
+    text-transform: uppercase;
+    margin: 0 0 8px;
+    padding: 0 4px;
+    font-weight: 500;
+  }
+  .pal-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+  }
+  .type-card {
+    position: relative;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 10px 12px;
+    text-align: left;
+    cursor: pointer;
+    color: var(--text);
+    font-family: inherit;
+    display: flex; flex-direction: column; gap: 4px;
+    transition: transform .08s, border-color .2s, background .2s;
+    overflow: hidden;
+  }
+  .type-card::before {
+    content: "";
+    position: absolute;
+    left: 0; top: 0; bottom: 0;
+    width: 3px;
+    background: var(--c);
+    box-shadow: 0 0 12px var(--c);
+  }
+  .type-card:hover { transform: translateY(-1px); border-color: var(--c); background: var(--panel-2); }
+  .type-card:active { transform: scale(.97); }
+  .type-card .row1 { display: flex; align-items: center; gap: 8px; }
+  .type-card .icon { font-size: 13px; }
+  .type-card .name { font-size: 12px; font-weight: 600; flex: 1; }
+  .type-card .key {
+    font-family: ui-monospace, Menlo, monospace;
+    font-size: 9px;
+    color: var(--muted);
+    border: 1px solid var(--border-2);
+    padding: 1px 5px;
+    border-radius: 3px;
+  }
+  .type-card .row2 { display: flex; justify-content: space-between; align-items: center; font-size: 11px; }
+  .type-card .mib {
+    font-family: ui-monospace, Menlo, monospace;
+    color: var(--c);
+  }
+  .type-card .mib .u { color: var(--muted); font-size: 9px; }
+  .type-card .sec {
+    font-family: ui-monospace, Menlo, monospace;
+    letter-spacing: -1.5px;
+    color: var(--muted);
+  }
+  .type-card .sec .on { color: var(--c); }
+
+  /* ============== STAGE ============== */
+  .stage {
+    display: flex; flex-direction: column; gap: 10px;
+    align-items: center;
+  }
+  .ram-frame {
+    position: relative;
+    width: 100%;
+    max-width: 560px;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background:
+      linear-gradient(180deg, rgba(255,255,255,.02), transparent),
+      var(--panel);
+    overflow: hidden;
+  }
+  .ram-header {
+    padding: 10px 14px;
+    display: flex; justify-content: space-between; align-items: center;
+    border-bottom: 1px solid var(--border);
+    font-size: 11px;
+    letter-spacing: .2em;
+    color: var(--muted);
+    text-transform: uppercase;
+  }
+  .ram-header .label .green { color: var(--green); }
+  .ram-header .meter {
+    width: 200px; height: 4px;
+    background: rgba(255,255,255,.05);
+    border-radius: 4px; overflow: hidden;
+  }
+  .ram-header .meter-fill {
+    height: 100%;
+    background: var(--green);
+    width: 0%;
+    transition: width .3s, background .3s;
+    box-shadow: 0 0 12px var(--green);
+  }
+  .ram-box {
+    position: relative;
+    display: flex;
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-content: flex-start;
+    gap: 2px;
+    padding: 6px;
+    height: 500px;
+    overflow: hidden;
+    background:
+      repeating-linear-gradient(0deg, rgba(255,255,255,.02) 0 1px, transparent 1px 14px),
+      repeating-linear-gradient(90deg, rgba(255,255,255,.02) 0 1px, transparent 1px 14px);
+  }
+  .ram-box.warn { box-shadow: inset 0 0 0 1px rgba(255,140,43,.25); }
+  .ram-box.crit { box-shadow: inset 0 0 0 1px rgba(255,77,109,.5); animation: shake .5s infinite; }
+  @keyframes shake {
+    0%,100% { transform: translateX(0); }
+    25% { transform: translateX(-1px); }
+    75% { transform: translateX(1px); }
+  }
+
+  .vm-block {
+    position: relative;
+    border-radius: 3px;
+    background: var(--c);
+    box-shadow: 0 0 8px var(--c-glow, transparent), inset 0 1px 0 rgba(255,255,255,.25);
+    animation: drop .45s cubic-bezier(.2,.8,.25,1);
+    flex: 0 0 auto;
+    display: grid; place-items: center;
+    font-size: 10px;
+    color: rgba(0,0,0,.65);
+    font-weight: 700;
+  }
+  @keyframes drop {
+    0% { transform: translateY(-80px) rotate(-8deg); opacity: 0; }
+    60% { transform: translateY(4px) rotate(1deg); opacity: 1; }
+    100% { transform: translateY(0) rotate(0); opacity: 1; }
+  }
+
+  .oom-overlay {
+    position: absolute; inset: 0;
+    display: none;
+    place-items: center;
+    background: radial-gradient(400px 200px at 50% 50%, rgba(255,77,109,.3), rgba(10,11,16,.9));
+    z-index: 10;
+    padding: 20px;
+  }
+  .oom-overlay.show { display: grid; animation: oomFlash .4s; }
+  @keyframes oomFlash {
+    0% { background: rgba(255,77,109,.8); }
+    100% { background: radial-gradient(400px 200px at 50% 50%, rgba(255,77,109,.3), rgba(10,11,16,.9)); }
+  }
+  .oom-box {
+    text-align: center;
+    background: var(--panel);
+    border: 1px solid var(--red);
+    box-shadow: 0 0 40px rgba(255,77,109,.3);
+    border-radius: 14px;
+    padding: 26px 32px;
+    max-width: 380px;
+  }
+  .oom-title {
+    font-family: ui-monospace, Menlo, monospace;
+    font-size: 42px;
+    font-weight: 800;
+    letter-spacing: .05em;
+    color: var(--red);
+    text-shadow: 0 0 20px rgba(255,77,109,.6);
+    line-height: 1;
+  }
+  .oom-sub { font-size: 11px; letter-spacing: .3em; color: var(--muted); text-transform: uppercase; margin-top: 4px; }
+  .oom-stats { margin: 20px 0 22px; display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .oom-stats .n { font-size: 26px; color: var(--green); font-family: ui-monospace, Menlo, monospace; }
+  .oom-stats .k { font-size: 10px; color: var(--muted); letter-spacing: .2em; text-transform: uppercase; }
+  .oom-stats .hi { color: var(--amber); }
+  .oom-stats .hi.beat { color: var(--green); }
+  .oom-action {
+    background: var(--green);
+    color: #07090e;
+    border: none;
+    padding: 12px 24px;
+    border-radius: 999px;
+    font-family: inherit;
+    font-weight: 700;
+    font-size: 13px;
+    letter-spacing: .2em;
+    cursor: pointer;
+    text-transform: uppercase;
+    box-shadow: 0 0 24px rgba(157,255,110,.3);
+  }
+  .oom-action:hover { filter: brightness(1.1); }
+
+  .stage-hint { font-size: 11px; color: var(--muted); letter-spacing: .04em; text-align: center; }
+  .stage-hint kbd {
+    background: var(--panel); border: 1px solid var(--border-2); border-bottom-width: 2px;
+    padding: 1px 6px; border-radius: 4px; font-family: ui-monospace, Menlo, monospace;
+    font-size: 10px; margin: 0 2px;
+  }
+
+  /* ============== BREAKDOWN ============== */
+  .breakdown { display: flex; flex-direction: column; gap: 12px; }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px;
+  }
+  .panel h4 {
+    margin: 0 0 10px;
+    font-size: 10px; letter-spacing: .2em;
+    color: var(--muted);
+    text-transform: uppercase;
+    font-weight: 500;
+  }
+  .hi-score .n {
+    font-size: 32px;
+    color: var(--amber);
+    font-family: ui-monospace, Menlo, monospace;
+    letter-spacing: -0.01em;
+    line-height: 1;
+  }
+  .combo .n {
+    font-size: 32px;
+    color: var(--green);
+    font-family: ui-monospace, Menlo, monospace;
+    line-height: 1;
+  }
+  .combo .n.hot { color: var(--amber); text-shadow: 0 0 20px rgba(255,193,77,.6); }
+  .combo .bar { height: 3px; background: rgba(255,255,255,.06); border-radius: 999px; margin-top: 8px; overflow: hidden; }
+  .combo .bar-fill { height: 100%; width: 0%; background: var(--green); transition: width .2s; box-shadow: 0 0 8px var(--green); }
+
+  .types-list { display: flex; flex-direction: column; gap: 5px; max-height: 220px; overflow: auto; }
+  .types-list .row {
+    display: flex; justify-content: space-between; align-items: center;
+    font-size: 12px;
+    padding: 4px 6px;
+    border-radius: 4px;
+    background: rgba(255,255,255,.02);
+  }
+  .types-list .row .l { display: flex; align-items: center; gap: 6px; }
+  .types-list .row .l .dot { width: 8px; height: 8px; border-radius: 2px; }
+  .types-list .row .n { font-family: ui-monospace, Menlo, monospace; color: var(--muted); }
+  .types-list .row .n .total { color: var(--text); }
+
+  .log-list { display: flex; flex-direction: column; gap: 3px; max-height: 140px; overflow: hidden; font-family: ui-monospace, Menlo, monospace; font-size: 11px; }
+  .log-list .l { padding: 3px 6px; border-radius: 3px; background: rgba(255,255,255,.02); color: var(--muted); display: flex; justify-content: space-between; }
+  .log-list .l .pt { color: var(--green); }
+
+  /* ============== FLOATING SCORE ============== */
+  .float-score {
+    position: fixed;
+    pointer-events: none;
+    z-index: 50;
+    font-family: ui-monospace, Menlo, monospace;
+    font-weight: 700;
+    font-size: 16px;
+    color: var(--green);
+    text-shadow: 0 0 10px rgba(157,255,110,.6);
+    animation: floatUp 1s cubic-bezier(.2,.8,.2,1) forwards;
+  }
+  @keyframes floatUp {
+    from { transform: translate(-50%, 0); opacity: 1; }
+    to { transform: translate(-50%, -60px); opacity: 0; }
+  }
+
+  /* ============== FOOTER ============== */
+  footer {
+    margin-top: 30px;
+    padding-top: 18px;
+    border-top: 1px solid var(--border);
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 1.55;
+    display: flex; flex-wrap: wrap; gap: 14px;
+    justify-content: space-between; align-items: center;
+  }
+  footer a { color: var(--green); text-decoration: none; border-bottom: 1px dashed rgba(157,255,110,.3); }
+  footer a:hover { border-color: var(--green); }
+
+  /* ============== INTRO ============== */
+  .intro {
+    text-align: center;
+    padding: 50px 10px 20px;
+  }
+  .intro .brand-big {
+    font-family: ui-monospace, Menlo, monospace;
+    font-size: clamp(64px, 12vw, 120px);
+    font-weight: 800;
+    letter-spacing: -0.04em;
+    line-height: 1;
+  }
+  .intro .brand-big .dot { color: var(--green); text-shadow: 0 0 30px rgba(157,255,110,.6); animation: blink 1.6s infinite; }
+  @keyframes blink { 0%, 90%, 100% { opacity: 1; } 93% { opacity: .4; } }
+  .intro p {
+    color: var(--muted);
+    max-width: 580px;
+    margin: 18px auto 4px;
+    line-height: 1.6;
+  }
+  .intro p b { color: var(--text); }
+  .intro .start {
+    margin-top: 22px;
+    background: var(--green);
+    color: #07090e;
+    font-family: inherit;
+    font-weight: 800;
+    font-size: 14px;
+    letter-spacing: .2em;
+    padding: 14px 32px;
+    border-radius: 999px;
+    border: none;
+    cursor: pointer;
+    text-transform: uppercase;
+    box-shadow: 0 0 30px rgba(157,255,110,.3);
+  }
+  .intro .start:hover { filter: brightness(1.1); }
+  .intro .hint { margin-top: 14px; color: var(--muted); font-size: 12px; }
+  .intro .hint kbd {
+    background: var(--panel); border: 1px solid var(--border-2); border-bottom-width: 2px;
+    padding: 1px 6px; border-radius: 4px; font-family: ui-monospace, Menlo, monospace;
+    font-size: 10px; margin: 0 2px;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <!-- =========== INTRO =========== -->
+  <div id="intro" class="intro">
+    <div class="brand-big">oom<span class="dot">.</span>ai</div>
+    <p>
+      Every AI agent needs somewhere to run. <b>13 isolation technologies</b> — from chroot to QEMU — each with a different memory cost and security level.
+      Pack as many workloads as you can into <b>2 GiB of RAM</b> before the OOM killer comes.
+    </p>
+    <button class="start" id="start">▶ INSERT COIN</button>
+    <div class="hint">
+      <kbd>1</kbd>–<kbd>0</kbd><kbd>q</kbd><kbd>w</kbd><kbd>e</kbd> spawn &nbsp;·&nbsp; <kbd>R</kbd> reset &nbsp;·&nbsp; <kbd>SPACE</kbd> random
+    </div>
+  </div>
+
+  <!-- =========== GAME =========== -->
+  <div id="game" style="display:none;">
+
+    <div class="hud">
+      <div class="brand">oom<span class="dot">.</span>ai<span class="tag">pack the stack</span></div>
+      <div class="stats">
+        <div class="stat">
+          <span class="k">Score</span>
+          <span class="v green" id="score">0</span>
+        </div>
+        <div class="stat">
+          <span class="k">VMs</span>
+          <span class="v" id="vms">0</span>
+        </div>
+        <div class="stat">
+          <span class="k">RAM</span>
+          <span class="v" id="ram-used">0</span>
+          <span class="sub mono">/ 2048 MiB</span>
+        </div>
+        <div class="stat">
+          <span class="k">Chain</span>
+          <span class="v amber" id="chain">×1.0</span>
+        </div>
+      </div>
+      <button class="hud-btn" id="reset">↻ RESET</button>
+    </div>
+
+    <div class="tagline">
+      Click an isolation type to spawn it. Higher security ⇒ more points. Different types ⇒ <b>chain multiplier</b>. Don't OOM.
+    </div>
+
+    <div class="layout">
+
+      <!-- PALETTE -->
+      <aside class="palette" id="palette"></aside>
+
+      <!-- STAGE -->
+      <main class="stage">
+        <div class="ram-frame">
+          <div class="ram-header">
+            <div class="label"><span class="green">●</span> RAM · 2048 MiB</div>
+            <div class="meter"><div class="meter-fill" id="meter"></div></div>
+          </div>
+          <div class="ram-box" id="ram-box"></div>
+          <div class="oom-overlay" id="oom">
+            <div class="oom-box">
+              <div class="oom-title">OOM</div>
+              <div class="oom-sub">killed by the kernel</div>
+              <div class="oom-stats">
+                <div><div class="n" id="oom-score">0</div><div class="k">Final score</div></div>
+                <div><div class="n hi" id="oom-hi">0</div><div class="k">High score</div></div>
+              </div>
+              <button class="oom-action" id="oom-retry">TRY AGAIN</button>
+            </div>
+          </div>
+        </div>
+        <div class="stage-hint">
+          Memory fragmentation is a feature. <kbd>1</kbd>–<kbd>0</kbd><kbd>q</kbd><kbd>w</kbd><kbd>e</kbd> hotkeys &nbsp;·&nbsp; <kbd>SPACE</kbd> random spawn &nbsp;·&nbsp; <kbd>R</kbd> reset
+        </div>
+      </main>
+
+      <!-- BREAKDOWN -->
+      <aside class="breakdown">
+        <div class="panel hi-score">
+          <h4>High score</h4>
+          <div class="n mono" id="hi-score">0</div>
+        </div>
+        <div class="panel combo">
+          <h4>Chain multiplier</h4>
+          <div class="n mono" id="combo-n">×1.0</div>
+          <div class="bar"><div class="bar-fill" id="combo-bar"></div></div>
+        </div>
+        <div class="panel">
+          <h4>Running (<span id="unique-n">0</span>/13 types)</h4>
+          <div class="types-list" id="types-list"></div>
+        </div>
+        <div class="panel">
+          <h4>Event log</h4>
+          <div class="log-list" id="log-list"></div>
+        </div>
+      </aside>
+
+    </div>
+
+    <footer>
+      <div>
+        <b style="color:var(--text);">Source:</b>
+        <a href="https://emirb.github.io/blog/microvm-2026/" target="_blank" rel="noreferrer">“MicroVM Isolation Landscape in 2026” · Emir Beganović</a>
+        &nbsp;·&nbsp;
+        <a href="https://opencomputer.dev" target="_blank" rel="noreferrer">opencomputer.dev</a>
+      </div>
+      <div style="color:var(--muted);">Single HTML file. No frameworks. No network.</div>
+    </footer>
+
+  </div>
+
+</div>
+
+<script>
+// =============================================================
+// ISOLATION TYPES
+// =============================================================
+const TYPES = [
+  // Shared kernel
+  { id:'chr',   cat:'Shared kernel',   name:'chroot',          icon:'🗂',  mib:1,   sec:1,  color:'#64748b', key:'1',
+    note:'Filesystem-only. Trivially escapable.' },
+  { id:'ct',    cat:'Shared kernel',   name:'Container',       icon:'📦',  mib:3,   sec:2,  color:'#3b82f6', key:'2',
+    note:'runc + namespaces. Shared host kernel.' },
+  { id:'ctplus',cat:'Shared kernel',   name:'Hardened CT',     icon:'🔒',  mib:5,   sec:3,  color:'#1d4ed8', key:'3',
+    note:'seccomp + AppArmor + user-ns.' },
+  { id:'sys',   cat:'Shared kernel',   name:'Sysbox',          icon:'🧱',  mib:8,   sec:4,  color:'#7c3aed', key:'4',
+    note:'Rootless container, nested-capable.' },
+
+  // Userspace isolation
+  { id:'v8',    cat:'Userspace iso',   name:'V8 Isolate',      icon:'🟨',  mib:3,   sec:5,  color:'#f59e0b', key:'5',
+    note:'JS sandbox. Cloudflare Workers.' },
+  { id:'wasm',  cat:'Userspace iso',   name:'WebAssembly',     icon:'⬡',   mib:5,   sec:6,  color:'#a855f7', key:'6',
+    note:'Linear memory + imports.' },
+  { id:'gvs',   cat:'Userspace iso',   name:'gVisor',          icon:'🛡',  mib:15,  sec:6,  color:'#fb923c', key:'7',
+    note:'Userspace kernel. 53 host syscalls.' },
+
+  // MicroVMs
+  { id:'fc',    cat:'MicroVMs',        name:'Firecracker',     icon:'🔥',  mib:5,   sec:9,  color:'#ef4444', key:'8',
+    note:'AWS Lambda. 83K Rust.' },
+  { id:'ch',    cat:'MicroVMs',        name:'Cloud Hypervisor',icon:'☁',   mib:10,  sec:9,  color:'#6366f1', key:'9',
+    note:'Intel. 106K Rust. Nested KVM.' },
+  { id:'qmv',   cat:'MicroVMs',        name:'QEMU microvm',    icon:'⚡',   mib:32,  sec:9,  color:'#7b7bff', key:'0',
+    note:'QEMU -M microvm. Tuned kernel.' },
+
+  // Feature VMs
+  { id:'ed',    cat:'Feature VMs',     name:'Edera',           icon:'⛓',   mib:20,  sec:10, color:'#10b981', key:'q',
+    note:'Type-1 hypervisor. Ring -1.' },
+  { id:'kata',  cat:'Feature VMs',     name:'Kata',            icon:'🔷',  mib:50,  sec:9,  color:'#06b6d4', key:'w',
+    note:'OCI-compat wrapper over microVMs.' },
+  { id:'qemu',  cat:'Feature VMs',     name:'QEMU full',       icon:'🖥',  mib:128, sec:10, color:'#42d4f4', key:'e',
+    note:'Windows · GPU · USB · MS-DOS. opencomputer.dev.' },
+];
+
+const RAM_TOTAL = 2048;
+const CHAIN_TIMEOUT_MS = 2500;
+
+// =============================================================
+// STATE
+// =============================================================
+const state = {
+  started: false,
+  over: false,
+  score: 0,
+  vms: 0,
+  used: 0,
+  counts: {},
+  lastType: null,
+  lastTime: 0,
+  chain: 1.0,
+  chainTimer: null,
+  hi: +(localStorage.getItem('oom_ai_hi') || 0),
+  log: [],
+};
+
+const $ = s => document.querySelector(s);
+const TYPES_BY = Object.fromEntries(TYPES.map(t => [t.id, t]));
+
+// =============================================================
+// AUDIO (WebAudio beeps for arcade feel)
+// =============================================================
+let audio = null;
+function beep(freq, dur = 0.06, type = 'square', vol = 0.06) {
+  try {
+    if (!audio) audio = new (window.AudioContext || window.webkitAudioContext)();
+    const osc = audio.createOscillator();
+    const gain = audio.createGain();
+    osc.connect(gain); gain.connect(audio.destination);
+    osc.type = type;
+    osc.frequency.value = freq;
+    gain.gain.setValueAtTime(vol, audio.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.0001, audio.currentTime + dur);
+    osc.start();
+    osc.stop(audio.currentTime + dur);
+  } catch (e) { /* audio disabled */ }
+}
+
+// =============================================================
+// PALETTE RENDER
+// =============================================================
+function renderPalette() {
+  const pal = $('#palette');
+  pal.innerHTML = '';
+  const cats = [...new Set(TYPES.map(t => t.cat))];
+  cats.forEach(cat => {
+    const sec = document.createElement('div');
+    sec.className = 'pal-section';
+    sec.innerHTML = `<h3>${cat}</h3><div class="pal-grid"></div>`;
+    const grid = sec.querySelector('.pal-grid');
+    TYPES.filter(t => t.cat === cat).forEach(t => {
+      const dots = Array.from({length:10}, (_,i) => i < t.sec ? '<span class="on">●</span>' : '●').join('');
+      const card = document.createElement('button');
+      card.className = 'type-card';
+      card.style.setProperty('--c', t.color);
+      card.dataset.id = t.id;
+      card.title = t.note;
+      card.innerHTML = `
+        <div class="row1">
+          <span class="icon">${t.icon}</span>
+          <span class="name">${t.name}</span>
+          <span class="key">${t.key.toUpperCase()}</span>
+        </div>
+        <div class="row2">
+          <span class="mib">${t.mib}<span class="u"> MiB</span></span>
+          <span class="sec">${dots}</span>
+        </div>
+      `;
+      card.addEventListener('click', (e) => spawn(t.id, e));
+      grid.appendChild(card);
+    });
+    pal.appendChild(sec);
+  });
+}
+
+// =============================================================
+// BLOCK SIZING (visual, proportional to MiB)
+// =============================================================
+function sizeFor(mib) {
+  const side = Math.max(10, Math.round(Math.sqrt(mib * 14)));
+  return { w: side, h: side };
+}
+
+// =============================================================
+// SPAWN
+// =============================================================
+function spawn(id, event) {
+  if (state.over) return;
+  const t = TYPES_BY[id];
+  if (!t) return;
+
+  if (state.used + t.mib > RAM_TOTAL) {
+    gameOver();
+    return;
+  }
+
+  state.used += t.mib;
+  state.vms++;
+  state.counts[id] = (state.counts[id] || 0) + 1;
+
+  // Chain logic
+  const now = performance.now();
+  if (state.lastType && state.lastType !== id && (now - state.lastTime) < CHAIN_TIMEOUT_MS) {
+    state.chain = Math.min(5.0, Math.round((state.chain + 0.2) * 10) / 10);
+  } else if (state.lastType === id) {
+    state.chain = Math.max(1.0, Math.round((state.chain - 0.1) * 10) / 10);
+  } else if ((now - state.lastTime) >= CHAIN_TIMEOUT_MS) {
+    state.chain = 1.0;
+  }
+  state.lastType = id;
+  state.lastTime = now;
+  if (state.chainTimer) clearTimeout(state.chainTimer);
+  state.chainTimer = setTimeout(() => { state.chain = 1.0; updateHUD(); }, CHAIN_TIMEOUT_MS);
+
+  // Score
+  const base = t.sec * 10;
+  const award = Math.floor(base * state.chain);
+  state.score += award;
+
+  // Audio: frequency proportional to security
+  beep(240 + t.sec * 40, 0.05);
+
+  // DOM: block
+  const sz = sizeFor(t.mib);
+  const block = document.createElement('div');
+  block.className = 'vm-block';
+  block.style.setProperty('--c', t.color);
+  block.style.setProperty('--c-glow', t.color + '55');
+  block.style.width = sz.w + 'px';
+  block.style.height = sz.h + 'px';
+  block.title = `${t.name} · ${t.mib} MiB · sec ${t.sec}`;
+  if (sz.w >= 22 && sz.h >= 16) block.textContent = t.icon;
+  $('#ram-box').appendChild(block);
+
+  // Floating score
+  if (event) {
+    const fs = document.createElement('div');
+    fs.className = 'float-score';
+    fs.textContent = '+' + award + (state.chain > 1 ? ` ×${state.chain.toFixed(1)}` : '');
+    const r = event.currentTarget.getBoundingClientRect();
+    fs.style.left = (r.left + r.width / 2) + 'px';
+    fs.style.top = (r.top + 10) + 'px';
+    document.body.appendChild(fs);
+    setTimeout(() => fs.remove(), 1000);
+  }
+
+  // Log
+  state.log.unshift({ t, award, mult: state.chain });
+  if (state.log.length > 7) state.log.pop();
+
+  updateHUD();
+}
+
+// =============================================================
+// HUD UPDATE
+// =============================================================
+function updateHUD() {
+  $('#score').textContent = state.score.toLocaleString();
+  $('#vms').textContent = state.vms;
+  $('#ram-used').textContent = state.used;
+  $('#hi-score').textContent = Math.max(state.hi, state.score).toLocaleString();
+
+  const pct = (state.used / RAM_TOTAL) * 100;
+  const meter = $('#meter');
+  meter.style.width = pct + '%';
+  const box = $('#ram-box');
+  box.classList.toggle('warn', pct >= 80 && pct < 95);
+  box.classList.toggle('crit', pct >= 95);
+  if (pct >= 95)      meter.style.background = 'var(--red)',   meter.style.boxShadow = '0 0 12px var(--red)';
+  else if (pct >= 80) meter.style.background = 'var(--warn)',  meter.style.boxShadow = '0 0 12px var(--warn)';
+  else                meter.style.background = 'var(--green)', meter.style.boxShadow = '0 0 12px var(--green)';
+
+  $('#chain').textContent = '×' + state.chain.toFixed(1);
+  $('#combo-n').textContent = '×' + state.chain.toFixed(1);
+  $('#combo-n').classList.toggle('hot', state.chain >= 2.5);
+  $('#combo-bar').style.width = ((state.chain - 1) / 4) * 100 + '%';
+
+  $('#unique-n').textContent = Object.keys(state.counts).length;
+
+  const list = $('#types-list');
+  list.innerHTML = '';
+  Object.keys(state.counts)
+    .map(id => ({ t: TYPES_BY[id], n: state.counts[id] }))
+    .sort((a, b) => b.n - a.n)
+    .forEach(({ t, n }) => {
+      const row = document.createElement('div');
+      row.className = 'row';
+      row.innerHTML = `
+        <div class="l"><span class="dot" style="background:${t.color}"></span>${t.name}</div>
+        <div class="n mono"><span class="total">${n}</span> · ${n * t.mib} MiB</div>
+      `;
+      list.appendChild(row);
+    });
+
+  const log = $('#log-list');
+  log.innerHTML = '';
+  state.log.forEach(e => {
+    const el = document.createElement('div');
+    el.className = 'l';
+    el.innerHTML = `
+      <span style="color:${e.t.color}">${e.t.icon} ${e.t.name}</span>
+      <span class="pt">+${e.award}${e.mult > 1 ? ' ×' + e.mult.toFixed(1) : ''}</span>
+    `;
+    log.appendChild(el);
+  });
+}
+
+// =============================================================
+// GAME OVER
+// =============================================================
+function gameOver() {
+  if (state.over) return;
+  state.over = true;
+  const box = $('#ram-box');
+  box.classList.add('crit');
+  beep(90, 0.8, 'sawtooth', 0.12);
+  setTimeout(() => beep(60, 1.2, 'sawtooth', 0.1), 120);
+
+  const beat = state.score > state.hi;
+  if (beat) {
+    state.hi = state.score;
+    localStorage.setItem('oom_ai_hi', state.hi);
+    setTimeout(() => { beep(880, .1); beep(1100, .1); beep(1320, .2); }, 600);
+  }
+
+  $('#oom-score').textContent = state.score.toLocaleString();
+  $('#oom-hi').textContent = state.hi.toLocaleString();
+  $('#oom-hi').classList.toggle('beat', beat);
+  $('#oom').classList.add('show');
+}
+
+function reset() {
+  state.score = 0;
+  state.vms = 0;
+  state.used = 0;
+  state.counts = {};
+  state.lastType = null;
+  state.lastTime = 0;
+  state.chain = 1.0;
+  state.log = [];
+  state.over = false;
+  if (state.chainTimer) clearTimeout(state.chainTimer);
+
+  $('#ram-box').innerHTML = '';
+  $('#ram-box').classList.remove('warn', 'crit');
+  $('#oom').classList.remove('show');
+  updateHUD();
+}
+
+// =============================================================
+// EVENTS
+// =============================================================
+$('#start').addEventListener('click', () => {
+  $('#intro').style.display = 'none';
+  $('#game').style.display = 'block';
+  renderPalette();
+  updateHUD();
+  state.started = true;
+});
+$('#reset').addEventListener('click', reset);
+$('#oom-retry').addEventListener('click', reset);
+
+document.addEventListener('keydown', e => {
+  if (!state.started) {
+    if (e.code === 'Space' || e.key === 'Enter') { e.preventDefault(); $('#start').click(); }
+    return;
+  }
+  if (state.over && e.key.toLowerCase() === 'r') return reset();
+  const key = e.key.toLowerCase();
+  if (e.code === 'Space') {
+    e.preventDefault();
+    const t = TYPES[Math.floor(Math.random() * TYPES.length)];
+    const card = document.querySelector(`.type-card[data-id="${t.id}"]`);
+    spawn(t.id, card ? { currentTarget: card } : null);
+    return;
+  }
+  if (key === 'r') return reset();
+  const t = TYPES.find(t => t.key.toLowerCase() === key);
+  if (t) {
+    const card = document.querySelector(`.type-card[data-id="${t.id}"]`);
+    spawn(t.id, card ? { currentTarget: card } : null);
+  }
+});
+</script>
+</body>
+</html>
